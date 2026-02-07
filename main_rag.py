@@ -11,11 +11,12 @@ from langchain_community.document_loaders import TextLoader
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import HumanMessage, AIMessage
 
 # 2. Configuración de la página
 st.set_page_config(page_title="Mi Portafolio AI - RAG", layout="wide")
 st.title("📄 Chat con tus Documentos (RAG)")
-load_dotenv("../.env")
+load_dotenv()
 
 # 3. Sidebar para subir archivos
 with st.sidebar:
@@ -62,37 +63,64 @@ with st.sidebar:
         # Esta pieza es la que buscará los fragmentos más parecidos a la pregunta del usuario
         retriever = vectorstore.as_retriever()
 
-# 6. Área Principal: Chat
-st.divider() # Una línea visual para separar
-pregunta_usuario = st.chat_input("Pregúntale algo a tu documento...")
+# Definición del modelo usando la versión 3.0 Preview
+llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview")
 
-if pregunta_usuario:
-    # Verificamos si ya tenemos el archivo procesado en la base de datos
-    if 'retriever' in locals():
-        with st.spinner("Buscando en el documento..."):
-            # 7. Configurar el LLM (Gemini)
-            llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview")
+# --- 1. GESTIÓN DE MEMORIA (Session State) ---
+# Inicializamos el "baúl" de mensajes si no existe
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Dibujamos los mensajes previos en cada "rerun" de la app
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# --- 2. ENTRADA DE USUARIO ---
+if prompt_usuario := st.chat_input("¿En qué puedo ayudarte con el documento?"):
+    # Añadimos y mostramos la pregunta del usuario
+    st.chat_message("user").markdown(prompt_usuario)
+    st.session_state.messages.append({"role": "user", "content": prompt_usuario})
+
+    # --- 3. PROCESAMIENTO RAG CON CONTEXTO ---
+    if 'retriever' in locals() or 'retriever' in globals():
+        with st.chat_message("assistant"):
+            # Serializamos el historial a String (últimos 6 mensajes para no saturar)
+            historial_str = "\n".join(
+                [f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state.messages[-7:-1]]
+            )
+
+            # Definimos el Template con el placeholder de historial
+            template = """Eres un asistente experto. Responde de forma concisa usando el contexto e historial.
             
-            # 8. Definir el "Plano de construcción" del RAG (Prompt)
-            template = """Responde la pregunta basándote solo en el contexto proporcionado:
-            <contexto>
+            CONTEXTO RECUPERADO:
             {context}
-            </contexto>
-            Pregunta: {question}"""
             
-            prompt = ChatPromptTemplate.from_template(template)
+            HISTORIAL DE CHARLA:
+            {chat_history}
             
-            # 9. La Cadena RAG (Usando la sintaxis moderna que vimos en la doc)
-            # Esta cadena: toma la pregunta -> busca contexto -> se lo pasa al LLM -> devuelve texto
+            PREGUNTA: {question}
+            """
+            
+            prompt_template = ChatPromptTemplate.from_template(template)
+            
+            # La "Tubería" (Chain) con el truco de la función Lambda
             chain = (
-                {"context": retriever, "question": RunnablePassthrough()}
-                | prompt
-                | llm
+                {
+                    "context": retriever, 
+                    "question": RunnablePassthrough(),
+                    "chat_history": lambda x: historial_str
+                }
+                | prompt_template
+                | llm 
                 | StrOutputParser()
             )
+
+            # Generamos respuesta
+            respuesta = chain.invoke(prompt_usuario)
+            st.markdown(respuesta)
             
-            # 10. Ejecutar y mostrar respuesta
-            respuesta = chain.invoke(pregunta_usuario)
-            st.markdown(f"### Respuesta:\n{respuesta}")
+            # Guardamos la respuesta en la memoria
+            st.session_state.messages.append({"role": "assistant", "content": respuesta})
     else:
-        st.warning("⚠️ Primero sube un archivo en la barra lateral para poder chatear.")
+        st.warning("Por favor, sube un documento primero para activar el Retriever.")
