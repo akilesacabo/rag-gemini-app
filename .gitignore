@@ -1,0 +1,39 @@
+# --- Entornos Virtuales ---
+# Estos directorios contienen binarios pesados que no deben subirse
+venv/
+env/
+.env/
+portfolio_ai/
+
+# --- Variables de Entorno y Seguridad ---
+.env
+.flaskenv
+*.secret
+
+# --- Persistencia de Datos (Bases de datos Vectoriales) ---
+# Muy importante: No queremos subir la base de datos local a GitHub
+# Cada usuario debería regenerarla desde sus documentos
+**/chroma_db/
+**/*.db
+**/*.sqlite
+
+# --- Configuración de Editores ---
+# Ajustes locales que varían según el desarrollador
+.vscode/
+.idea/
+.project
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# --- Python y Sistema ---
+__pycache__/
+*.py[cod]
+*$py.class
+.DS_Store
+Thumbs.db
+
+# --- Logs y Temporales ---
+*.log
+tmp/
+temp/
