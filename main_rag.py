@@ -1,126 +1,198 @@
 import streamlit as st
 import os
+from typing import List, Optional
 from dotenv import load_dotenv
 
-# 1. IMPORTACIONES BASADAS EN LA DOCUMENTACIÓN OFICIAL (RAG + CHROMA)
-# No usamos 'langchain.chains' porque, como bien dices, está deprecado/movido
+# Importaciones de LangChain y Google
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_chroma import Chroma
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import TextLoader
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, Runnable
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.messages import HumanMessage, AIMessage
 
-# 2. Configuración de la página
-st.set_page_config(page_title="Mi Portafolio AI - RAG", layout="wide")
-st.title("📄 Chat con tus Documentos (RAG)")
+# --- 1. CONFIGURACIÓN Y CONSTANTES ---
+# Centralizamos las configuraciones para no tener "números mágicos" dispersos en el código.
+CONFIG = {
+    "page_title": "Portafolio AI - RAG Pro",
+    "page_icon": "🧠",
+    "chunk_size": 2000,
+    "chunk_overlap": 200,
+    "embedding_model": "gemini-embedding-001",
+    "llm_model": "gemini-3-flash-preview",
+    "k_retrieval": 5  # Número de fragmentos a recuperar
+}
+
+# Cargar variables de entorno una sola vez al inicio
 load_dotenv()
 
-# 3. Sidebar para subir archivos
-with st.sidebar:
-    st.header("Configuración")
-    archivo_subido = st.file_uploader("Sube un archivo de texto (.txt)", type=("txt"))
+
+# --- 2. Backend ---
+
+def validate_api_key(key_name ="GOOGLE_API_KEY" ):
+    """Verifica la existencia de la API Key en las variables de entorno"""
+    if not os.getenv(key_name):
+        st.error("❌ ERROR CRÍTICO: No se encontró GOOGLE_API_KEY en el archivo .env")
+        st.stop()
+
+
+@st.cache_resource(show_spinner=True)
+def process_document_to_vectorstore(file_content: str):
+    """Procesa el texto y crea la base de datos vectorial."""
     
-    if archivo_subido:
-        st.success("Archivo subido con éxito")
-
-        # Mostrar un mensaje de error si el usuario sube un archivo incorrecto
-
-        # 1. Leer el contenido del archivo
-        # El archivo subido viene en formato binario, por eso usamos .read().decode()
-        string_data = archivo_subido.read().decode("utf-8")
-
-        # 2. Configurar el "Splitter" (El que corta el texto)
-        # Usamos el RecursiveCharacterTextSplitter por recomendación oficial:
-        # Intenta mantener párrafos y oraciones juntos para no perder el sentido.
+    try: 
+        #1 Spliting 
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=2000,    # Tamaño de cada trozo (caracteres)
-            chunk_overlap=200   # Cuánto se repite entre un trozo y otro
+            chunk_size = CONFIG["chunk_size"],
+            chunk_overlap = CONFIG["chunk_overlap"]
         )
+        fragments  = text_splitter.split_text(file_content)
 
-        # 3. Crear los fragmentos (chunks)
-        # Convertimos el texto largo en una lista de pedacitos
-        fragmentos = text_splitter.split_text(string_data)
-
-        # Mostrar una pequeña estadística en la interfaz
-        st.info(f"El documento ha sido dividido en {len(fragmentos)} fragmentos.")
-
-        # 4. Crear los Embeddings y la Base de Datos Vectorial
-        # Usamos el modelo de Google para generar los vectores numéricos
+        #2 Embedding 
         embeddings_model = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001")
-        
-        # Creamos la base de datos Chroma en memoria a partir de nuestros fragmentos
-        vectorstore = Chroma.from_texts(
-            texts=fragmentos, 
+
+        #3 Vector Store
+        vector_store = Chroma.from_texts(
+            texts=fragments,
             embedding=embeddings_model
+            )
+        return vector_store
+
+    except Exception as e :
+        st.error(f"Error procesando el documento: {e}")
+        return None
+    
+def get_rag_chain(retriever,historial_str) -> Runnable:
+    """Construye el pipeline de procesamiento LCEL."""
+    
+    llm = ChatGoogleGenerativeAI(model=CONFIG["llm_model"])
+    template = """Eres un asistente experto y preciso.
+    Usa la siguiente información de contexto para responder a la pregunta del usuario.
+    Si la respuesta no está en el contexto, di que no lo sabes.
+
+    CONTEXTO:
+    {context}
+
+    HISTORIAL:
+    {chat_history}
+
+    PREGUNTA: {question}
+    """
+
+    prompt = ChatPromptTemplate.from_template(template)
+    
+    # Construcción de la cadena LCEL
+    chain = (
+            {
+                # CAMBIO AQUÍ: Le decimos que para el contexto solo use la 'question' del diccionario
+                "context": retriever,
+                
+                # Aquí también extraemos solo la pregunta para el prompt
+                "question": RunnablePassthrough(),
+                
+                # Y aquí el historial
+                "chat_history": lambda x: historial_str
+            }
+            | prompt
+            | llm
+            | StrOutputParser()
+        )
+    
+    return chain
+
+# --- 3. FRONTEND ---
+
+def initialize_session_state():
+    """Inicializa las variables de sesión si no existen."""
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "vectorstore" not in st.session_state:
+        st.session_state.vectorstore = None
+
+def render_sidebar():
+    """Gestiona la barra lateral y la carga de archivos."""
+    with st.sidebar:
+        st.header("📂 Configuración")
+        uploaded_file = st.file_uploader("Sube tu documento (.txt)", type=["txt"])
+        
+        if uploaded_file:
+            # Leemos el archivo
+            string_data = uploaded_file.read().decode("utf-8")
+            
+            # Llamamos a la función con caché
+            # Si el archivo es el mismo, Streamlit devuelve el resultado guardado instantáneamente.
+            vectorstore = process_document_to_vectorstore(string_data)
+            
+            if vectorstore:
+                st.session_state.vectorstore = vectorstore
+                st.success(f"✅ Documento procesado ({len(string_data)} caracteres)")
+        
+        if st.button("🧹 Limpiar Chat"):
+            st.session_state.messages = []
+            st.rerun()
+
+def render_chat_interface():
+    """Dibuja el historial y gestiona el input del usuario."""
+    st.title(CONFIG["page_title"])
+
+    # 1. Mostrar historial
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # 2. Input de usuario
+    if prompt := st.chat_input("Escribe tu pregunta sobre el documento..."):
+        # Guardar y mostrar pregunta
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # 3. Generar respuesta
+        if st.session_state.vectorstore is not None:
+            process_answer(prompt)
+        else:
+            st.warning("⚠️ Por favor, sube un documento primero para poder analizarlo.")
+
+def process_answer(question: str):
+    """Lógica para generar y mostrar la respuesta del asistente."""
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        
+        # Recuperar historial formateado
+        # Tomamos los últimos 5 pares para no saturar el contexto
+        history_str = "\n".join(
+            [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-10:]]
         )
         
-        st.success("✨ Base de datos vectorial creada correctamente")
-
-        # 5. Configurar el "Retriever" (Buscador)
-        # Esta pieza es la que buscará los fragmentos más parecidos a la pregunta del usuario
-        retriever = vectorstore.as_retriever()
-
-# Definición del modelo usando la versión 3.0 Preview
-llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview")
-
-# --- 1. GESTIÓN DE MEMORIA (Session State) ---
-# Inicializamos el "baúl" de mensajes si no existe
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# Dibujamos los mensajes previos en cada "rerun" de la app
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# --- 2. ENTRADA DE USUARIO ---
-if prompt_usuario := st.chat_input("¿En qué puedo ayudarte con el documento?"):
-    # Añadimos y mostramos la pregunta del usuario
-    st.chat_message("user").markdown(prompt_usuario)
-    st.session_state.messages.append({"role": "user", "content": prompt_usuario})
-
-    # --- 3. PROCESAMIENTO RAG CON CONTEXTO ---
-    if 'retriever' in locals() or 'retriever' in globals():
-        with st.chat_message("assistant"):
-            # Serializamos el historial a String (últimos 6 mensajes para no saturar)
-            historial_str = "\n".join(
-                [f"{m['role'].capitalize()}: {m['content']}" for m in st.session_state.messages[-7:-1]]
-            )
-
-            # Definimos el Template con el placeholder de historial
-            template = """Eres un asistente experto. Responde de forma concisa usando el contexto e historial.
+        # Configurar retriever
+        retriever = st.session_state.vectorstore.as_retriever(
+            search_kwargs={"k": CONFIG["k_retrieval"]}
+        )
+        
+        # Obtener la cadena
+        rag_chain = get_rag_chain(retriever,history_str)
+        
+        try:
+            # Ejecutar la cadena pasando el historial correctamente
+            response = rag_chain.invoke(question)
             
-            CONTEXTO RECUPERADO:
-            {context}
+            message_placeholder.markdown(response)
+            st.session_state.messages.append({"role": "assistant", "content": response})
             
-            HISTORIAL DE CHARLA:
-            {chat_history}
-            
-            PREGUNTA: {question}
-            """
-            
-            prompt_template = ChatPromptTemplate.from_template(template)
-            
-            # La "Tubería" (Chain) con el truco de la función Lambda
-            chain = (
-                {
-                    "context": retriever, 
-                    "question": RunnablePassthrough(),
-                    "chat_history": lambda x: historial_str
-                }
-                | prompt_template
-                | llm 
-                | StrOutputParser()
-            )
+        except Exception as e:
+            st.error(f"Error generando respuesta: {e}")
 
-            # Generamos respuesta
-            respuesta = chain.invoke(prompt_usuario)
-            st.markdown(respuesta)
-            
-            # Guardamos la respuesta en la memoria
-            st.session_state.messages.append({"role": "assistant", "content": respuesta})
-    else:
-        st.warning("Por favor, sube un documento primero para activar el Retriever.")
+# --- 4. MAIN ENTRY POINT ---
+def main():
+    st.set_page_config(
+        page_title=CONFIG["page_title"], 
+        page_icon=CONFIG["page_icon"], 
+        layout="wide"
+    )
+    validate_api_key()
+    initialize_session_state()
+    render_sidebar()
+    render_chat_interface()
+
+if __name__ == "__main__":
+    main()
